@@ -682,6 +682,84 @@ TEST_F(AdminCliTest, TestModifyTablePlacementPolicy) {
     extra_table, ClusterVerifier::EXACTLY, rows_inserted));
 }
 
+TEST_F(AdminCliTest, TestModifyPlacementInfoWithDifferentReplicas) {
+  // Start a cluster with 3 tservers, each corresponding to a different zone.
+  FLAGS_num_tablet_servers = 4;
+  FLAGS_num_replicas = 2;
+  std::vector<std::string> master_flags;
+  master_flags.push_back("--enable_load_balancing=true");
+  master_flags.push_back("--catalog_manager_wait_for_new_tablets_to_elect_leader=false");
+  std::vector<std::string> ts_flags;
+  ts_flags.push_back("--placement_cloud=c");
+  ts_flags.push_back("--placement_region=r");
+  ts_flags.push_back("--placement_zone=z${index % 2}");
+  BuildAndStart(ts_flags, master_flags);
+
+  const std::string& master_address = ToString(cluster_->master()->bound_rpc_addr());
+  auto client = ASSERT_RESULT(YBClientBuilder()
+      .add_master_server_addr(master_address)
+      .Build());
+
+  // Modify the cluster placement policy to consist of 2 zones of 2 and 3
+  // replicas respectively.
+  std::string output;
+  ASSERT_OK(Subprocess::Call(ToStringVector(GetAdminToolPath(),
+   "-master_addresses", master_address, "modify_placement_info", "c.r.z0:1,c.r.z1:2", 3, ""),
+   &output));
+
+  // Create a new table.
+  const auto extra_table = YBTableName(YQLDatabase::YQL_DATABASE_CQL,
+                                       kTableName.namespace_name(),
+                                       "extra-table");
+  // Start a workload.
+  TestWorkload workload(cluster_.get());
+  workload.set_table_name(extra_table);
+  workload.set_timeout_allowed(true);
+  workload.Setup();
+  workload.Start();
+
+  // Verify that the table has no custom placement policy set for it.
+  std::shared_ptr<client::YBTable> table;
+  ASSERT_OK(client->OpenTable(extra_table, &table));
+  ASSERT_FALSE(table->replication_info());
+  
+  // Fetch the placement policy for the table and verify that it matches
+  // the custom info set previously.
+  ASSERT_OK(client->OpenTable(extra_table, &table));
+
+  vector<int> found_zones_counters;
+  found_zones_counters.assign(2, 0);
+  ASSERT_EQ(table->replication_info().get().live_replicas().placement_blocks_size(), 3);
+  
+  for (int ii = 0; ii < 3; ++ii) {
+    auto pb = table->replication_info().get().live_replicas().placement_blocks(ii).cloud_info();
+    ASSERT_EQ(pb.placement_cloud(), "c");
+    ASSERT_EQ(pb.placement_region(), "r");
+    if (pb.placement_zone() == "z0") {
+      found_zones_counters[0]++;
+    } else if (pb.placement_zone() == "z1") {
+      found_zones_counters[1]++;
+    }
+  }
+
+  // Checking that z0 has 1 replica and z1 has 2 replicas
+  ASSERT_EQ(found_zones_counters[0], 1);
+  ASSERT_EQ(found_zones_counters[1], 2);
+
+  // Stop the workload.
+  workload.StopAndJoin();
+  int rows_inserted = workload.rows_inserted();
+  LOG(INFO) << "Number of rows inserted: " << rows_inserted;
+
+  sleep(5);
+
+  // Verify that there was no data loss.
+  ClusterVerifier cluster_verifier(cluster_.get());
+  ASSERT_NO_FATALS(cluster_verifier.CheckCluster());
+  ASSERT_NO_FATALS(cluster_verifier.CheckRowCount(
+    extra_table, ClusterVerifier::EXACTLY, rows_inserted));
+}
+
 TEST_F(AdminCliTest, TestClearPlacementPolicy) {
   // Start a cluster with 3 tservers.
   FLAGS_num_tablet_servers = 3;
