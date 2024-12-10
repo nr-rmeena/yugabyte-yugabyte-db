@@ -532,7 +532,7 @@ To increase retention of data for CDC, change the two flags, `cdc_intent_retenti
 
 {{< warning title="Important" >}}
 
-Longer values of `cdc_intent_retention_ms`, coupled with longer CDC lags (periods of downtime where the client is not requesting changes) can result in increased memory footprint in the YB-TServer and affect read performance.
+Memory footprint in YB-TServer is affected for replica identity FULL & DEFAULT and affect read performance.
 
 {{< /warning >}}
 
